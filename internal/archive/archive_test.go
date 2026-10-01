@@ -80,3 +80,30 @@ func TestManifestHash(t *testing.T) {
 func TestSchemaVersionConstant(t *testing.T) {
 	assert.Equal(t, 1, SchemaVersion)
 }
+
+func TestArchiveErrorPaths(t *testing.T) {
+	// Test context cancellation and error paths on Archiver operations
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var a *Archiver
+	_, err := a.IsArchived(ctx, 100, 200)
+	assert.NoError(t, err, "nil archiver is safe even with cancelled context")
+
+	// Test with an uninitialized or failing store / bucket configuration
+	opts := Options{
+		Bucket:          "test-bucket",
+		Endpoint:        "invalid-endpoint",
+		UseSSL:          false,
+		AccessKeyID:     "bad",
+		SecretAccessKey: "worse",
+	}
+	// New with invalid minio client connection should error or handle appropriately
+	var st store.Store
+	arch, err := New(st, opts)
+	// If client initialization fails or succeeds depending on lazy evaluation, test methods return wrapped errors.
+	if err == nil && arch != nil {
+		_, _, err = arch.ArchiveRange(ctx, 100, 200)
+		assert.Error(t, err, "cancelled context or storage failure must be returned")
+	}
+}
