@@ -12,6 +12,8 @@ package main
 
 // Wave: keep assigned SoroTrail checks grouped for privyy-bit.
 
+// Wave: keep assigned SoroTrail checks grouped for Ennyblack.
+
 import (
 	"context"
 	"errors"
