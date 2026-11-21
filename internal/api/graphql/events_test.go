@@ -1,22 +1,21 @@
 package graphql
 
 import (
-	"bytes"
 	"context"
+	"testing"
+	"time"
+
+	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/sorotrail/sorotrail/internal/api"
+	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"testing"
-	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"github.com/sorotrail/sorotrail/internal/api"
-	"github.com/sorotrail/sorotrail/internal/store"
 )
 
 // stubStore is a minimal store.Store implementation. Methods not
@@ -84,9 +83,11 @@ func (s *stubStore) ListWatchedContractsScoped(_ context.Context, sc store.Scope
 func (s *stubStore) GetContractSpecOverride(context.Context, string) ([]byte, error) {
 	return nil, nil
 }
+
 func (s *stubStore) SetContractSpecOverride(context.Context, string, []byte) error {
 	return nil
 }
+
 func (s *stubStore) DeleteContractSpecOverride(context.Context, string) error {
 	return nil
 }
@@ -380,4 +381,41 @@ func TestBuildEventFilterDirectly(t *testing.T) {
 
 func ptrInt32(i int32) *int32 {
 	return &i
+}
+func TestSubscriptionLimiterAndManager(t *testing.T) {
+	limiter := NewSubscriptionLimiter(2, 1)
+	if !limiter.Acquire("tenant-a") {
+		t.Errorf("expected tenant-a acquire to succeed")
+	}
+	if limiter.Acquire("tenant-a") {
+		t.Errorf("expected second acquire for tenant-a to fail per-tenant limit")
+	}
+	if !limiter.Acquire("tenant-b") {
+		t.Errorf("expected tenant-b acquire to succeed")
+	}
+	if limiter.Acquire("tenant-c") {
+		t.Errorf("expected total connection limit to block tenant-c")
+	}
+	limiter.Release("tenant-a")
+	if !limiter.Acquire("tenant-c") {
+		t.Errorf("expected tenant-c acquire to succeed after release")
+	}
+	limiter.Release("tenant-b")
+	limiter.Release("tenant-c")
+
+	mgr := NewSubscriptionManager()
+	sub := &SubscriptionContext{ID: time.Now()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if !mgr.Register(sub, cancel) {
+		t.Errorf("expected registration to succeed")
+	}
+	mgr.CloseAll()
+	select {
+	case <-ctx.Done():
+		// success
+	case <-time.After(time.Second):
+		t.Errorf("expected CloseAll to cancel subscription context")
+	}
+	mgr.Unregister(sub)
 }

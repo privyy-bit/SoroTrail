@@ -1,12 +1,13 @@
 package graphql
 
 import (
+	"context"
 	"fmt"
-
+	"github.com/sorotrail/sorotrail/internal/api/queries"
 	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/parser"
-
-	"github.com/sorotrail/sorotrail/internal/api/queries"
+	"sync"
+	"time"
 )
 
 // DepthLimit caps the maximum nesting depth of a GraphQL operation.
@@ -71,30 +72,6 @@ func CheckComplexityWithVariables(op *ast.OperationDefinition, vars map[string]a
 		return fmt.Errorf("query complexity %d exceeds complexity limit %d", c, ComplexityLimit)
 	}
 	return nil
-}
-
-func depth(sel []ast.Selection, current int) int {
-	max := current
-	for _, s := range sel {
-		switch t := s.(type) {
-		case *ast.Field:
-			if d := depth(t.SelectionSet, current+1); d > max {
-				max = d
-			}
-		case *ast.InlineFragment:
-			if d := depth(t.SelectionSet, current+1); d > max {
-				max = d
-			}
-		case *ast.FragmentSpread:
-			// fragment bodies are scored against the root selection set
-			// in CheckDepth. A spread here conservatively increments;
-			// the runtime executor will not double-count.
-			if d := current + 1; d > max {
-				max = d
-			}
-		}
-	}
-	return max
 }
 
 func complexity(sel []ast.Selection) int {
@@ -242,4 +219,130 @@ func isConnectionField(name string) bool {
 		return true
 	}
 	return false
+}
+
+// SubscriptionLimiter enforces per-connection and per-tenant subscription limits.
+type SubscriptionLimiter struct {
+	mu             sync.Mutex
+	tenantCounts   map[string]int
+	maxPerTenant   int
+	maxConnections int
+	totalConns     int
+}
+
+// NewSubscriptionLimiter constructs a SubscriptionLimiter with configured limits.
+func NewSubscriptionLimiter(maxConnections, maxPerTenant int) *SubscriptionLimiter {
+	return &SubscriptionLimiter{
+		tenantCounts:   make(map[string]int),
+		maxConnections: maxConnections,
+		maxPerTenant:   maxPerTenant,
+	}
+}
+
+// Acquire attempts to acquire a subscription slot for a connection and tenant.
+func (l *SubscriptionLimiter) Acquire(tenant string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.maxConnections > 0 && l.totalConns >= l.maxConnections {
+		return false
+	}
+	if tenant != "" && l.maxPerTenant > 0 && l.tenantCounts[tenant] >= l.maxPerTenant {
+		return false
+	}
+
+	l.totalConns++
+	if tenant != "" {
+		l.tenantCounts[tenant]++
+	}
+	return true
+}
+
+// Release releases the subscription slot for a connection and tenant.
+func (l *SubscriptionLimiter) Release(tenant string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.totalConns > 0 {
+		l.totalConns--
+	}
+	if tenant != "" {
+		if l.tenantCounts[tenant] > 0 {
+			l.tenantCounts[tenant]--
+		}
+		if l.tenantCounts[tenant] <= 0 {
+			delete(l.tenantCounts, tenant)
+		}
+	}
+}
+
+func depth(sel []ast.Selection, current int) int {
+	max := current
+	for _, s := range sel {
+		switch t := s.(type) {
+		case *ast.Field:
+			if d := depth(t.SelectionSet, current+1); d > max {
+				max = d
+			}
+		case *ast.InlineFragment:
+			if d := depth(t.SelectionSet, current+1); d > max {
+				max = d
+			}
+		case *ast.FragmentSpread:
+			if d := current + 1; d > max {
+				max = d
+			}
+		}
+	}
+	return max
+}
+
+// SubscriptionManager tracks active subscriptions for shutdown handling.
+type SubscriptionManager struct {
+	mu      sync.Mutex
+	closed  bool
+	closers map[*SubscriptionContext]context.CancelFunc
+}
+
+// NewSubscriptionManager creates a subscription manager.
+func NewSubscriptionManager() *SubscriptionManager {
+	return &SubscriptionManager{
+		closers: make(map[*SubscriptionContext]context.CancelFunc),
+	}
+}
+
+// SubscriptionContext holds per-subscription tracking info.
+type SubscriptionContext struct {
+	ID time.Time
+}
+
+// Register registers an active subscription.
+func (m *SubscriptionManager) Register(sub *SubscriptionContext, cancel context.CancelFunc) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
+	m.closers[sub] = cancel
+	return true
+}
+
+// Unregister removes a subscription.
+func (m *SubscriptionManager) Unregister(sub *SubscriptionContext) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.closers, sub)
+}
+
+// CloseAll closes all active subscriptions on server shutdown.
+func (m *SubscriptionManager) CloseAll() {
+	m.mu.Lock()
+	m.closed = true
+	cs := m.closers
+	m.closers = make(map[*SubscriptionContext]context.CancelFunc)
+	m.mu.Unlock()
+
+	for _, cancel := range cs {
+		cancel()
+	}
 }

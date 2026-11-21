@@ -276,6 +276,51 @@ func buildEventFilter(args EventFilterArgs) (store.EventFilter, string, string, 
 	return filter, cursor, order, orderBy, nil
 }
 
+// EventsResolver resolves the events subscription.
+func (r *Resolver) resolveEventStream(ctx context.Context, args EventFilterArgs) (<-chan EventResult, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("graphQL server misconfigured: store not wired")
+	}
+	filter, _, _, _, err := buildEventFilter(args)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan EventResult, 64)
+	go func() {
+		defer close(out)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				scope := scopeFrom(ctx)
+				if len(scope.Contracts()) == 0 && !scope.IsWildcard() {
+					return
+				}
+				f2 := filter
+				f2.Scope = scope
+				events, _, err := r.store.QueryEvents(ctx, f2)
+				if err != nil {
+					continue
+				}
+				for _, e := range events {
+					res := eventToResult(e)
+					select {
+					case <-ctx.Done():
+						return
+					case out <- res:
+					default:
+						// Drop with gap or non-blocking backpressure
+					}
+				}
+			}
+		}
+	}()
+	return out, nil
+}
+
 // resolveEvents is the events(root) resolver.
 func (r *Resolver) resolveEvents(ctx context.Context, args EventFilterArgs) (any, error) {
 	if r == nil || r.store == nil {
