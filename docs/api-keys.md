@@ -1,9 +1,6 @@
-# API Key Lifecycle and Scopes
+# Authentication: API Keys and OIDC Tokens
 
-SoroTrail protects its HTTP API with API keys. This document explains how keys
-are generated, stored, and verified, how the initial administrative key is
-bootstrapped, the role and enforcement of scopes, how to execute zero-downtime key
-rotations, and the backend deployment constraints.
+SoroTrail protects its HTTP API with API keys and OIDC-issued tokens. This document explains how API keys and OIDC tokens are accepted, verified, mapped to tenants and scopes, how keys are generated and stored, how the initial administrative key is bootstrapped, how to execute zero-downtime key rotations, and the backend deployment constraints.
 
 - [Key format and storage](#key-format-and-storage)
 - [Where the first key comes from (bootstrap)](#where-the-first-key-comes-from-bootstrap)
@@ -255,6 +252,29 @@ All SoroTrail write endpoints (`POST`, `PUT`, `PATCH`, and `DELETE`), including
   opportunistically on write operations. Twenty-four hours covers automated
   client retry budgets, webhook orchestrator backoffs, and CI/CD deployment
   pipelines while bounding storage growth in `idempotency_keys`.
+
+## OIDC Token Authentication
+
+SoroTrail supports accepting OIDC-issued JSON Web Tokens (JWTs) alongside API keys. When OIDC authentication is enabled, clients may present an OIDC bearer token in the `Authorization` header.
+
+### Configuration
+
+OIDC authentication is off by default. It is configured via environment variables:
+
+- `OIDC_ENABLED=true` — Enables OIDC verification.
+- `OIDC_ISSUER=https://auth.example.com/issuer` — Expected token issuer (`iss` claim).
+- `OIDC_AUDIENCE=sorotrail-api` — Expected token audience (`aud` claim).
+- `OIDC_JWKS_URL=https://auth.example.com/.well-known/jwks.json` — URL to fetch JSON Web Key Set for signature verification.
+- `OIDC_CLAIM_TENANT=tenant` — Claim name used to resolve the tenant name.
+- `OIDC_CLAIM_SCOPES=scope` — Claim name used to determine scopes or permissions.
+
+### Security & Validation Rules
+
+- **Fail-closed validation**: Issuer, audience, expiration (`exp`), not-before (`nbf`), and cryptographic signature are strictly checked. If JWKS cannot be fetched or rotated keys cannot be resolved, verification fails.
+- **Clock skew**: A small clock skew tolerance is applied to handle slight time drifts between the provider and the SoroTrail instance.
+- **Key set caching**: The remote JSON Web Key Set is cached with a bounded lifetime and negative result caching, ensuring provider key rotations are picked up without requiring server restarts while preventing unbounded requests on unknown key IDs (`kid`).
+- **No credential leakage**: No token claims, keys, or raw secrets appear in logs or error messages.
+- **Simultaneous presentation rule**: If both an API key and an OIDC token are present, authentication evaluates them deterministically according to precedence rules.
 
 ## Secret handling guidance
 
